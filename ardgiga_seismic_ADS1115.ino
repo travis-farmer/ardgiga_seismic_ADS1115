@@ -115,12 +115,26 @@ void writeConfig() {
 
 
 
-double vReal[SAMPLES];
-double vImag[SAMPLES];
-ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, SAMPLES, SAMPLE_FREQ);
+double vRealY[SAMPLES];
+double vImagY[SAMPLES];
+ArduinoFFT<double> FFTy = ArduinoFFT<double>(vRealY, vImagY, SAMPLES, SAMPLE_FREQ);
+
+double vRealX[SAMPLES];
+double vImagX[SAMPLES];
+ArduinoFFT<double> FFTx = ArduinoFFT<double>(vRealX, vImagX, SAMPLES, SAMPLE_FREQ);
+
+double vRealZ[SAMPLES];
+double vImagZ[SAMPLES];
+ArduinoFFT<double> FFTz = ArduinoFFT<double>(vRealZ, vImagZ, SAMPLES, SAMPLE_FREQ);
+
+
+
+
 Adafruit_ADS1115 ads; // Create the 16-bit ADC object
 EthernetClient ethernet;
-float peakFrequency = 0;
+float peakFrequencyY = 0;
+float peakFrequencyX = 0;
+float peakFrequencyZ = 0;
 unsigned int localPort = 8888;       // local port to listen for UDP packets
 
 const char timeServer[] = "time.nist.gov"; // time.nist.gov NTP server
@@ -136,10 +150,43 @@ int port = 8086;
 
 HttpClient Hclient = HttpClient(ethernet, serverAddress, port);
 
+struct FilterY {
+  float fx1;
+  float fx2;
+  float fy1;
+  float fy2;
+} filtY;
 
-// Global variables with unique prefixes to avoid Bessel function collisions
-float fx1 = 0, fx2 = 0; // Previous inputs
-float fy1 = 0, fy2 = 0; // Previous outputs
+struct FilterX {
+  float fx1;
+  float fx2;
+  float fy1;
+  float fy2;
+} filtX;
+
+struct FilterZ {
+  float fx1;
+  float fx2;
+  float fy1;
+  float fy2;
+} filtZ;
+
+void setFiltInit() {
+  filtY.fx1 = 0;
+  filtY.fx2 = 0;
+  filtY.fy1 = 0;
+  filtY.fy2 = 0;
+
+  filtX.fx1 = 0;
+  filtX.fx2 = 0;
+  filtX.fy1 = 0;
+  filtX.fy2 = 0;
+
+  filtZ.fx1 = 0;
+  filtZ.fx2 = 0;
+  filtZ.fy1 = 0;
+  filtZ.fy2 = 0;
+}
 
 // Filter Coefficients (Keep these as-is or prefix them too)
 const float fb0 = 0.0675;
@@ -148,15 +195,41 @@ const float fb2 = 0.0675;
 const float fa1 = -1.1429;
 const float fa2 = 0.4128;
 
-float applyFilter(int16_t input) {
+float applyFilterY(int16_t input) {
   // Use the new prefixed names in the calculation
-  float output = (fb0 * input) + (fb1 * fx1) + (fb2 * fx2) - (fa1 * fy1) - (fa2 * fy2);
+  float output = (fb0 * input) + (fb1 * filtY.fx1) + (fb2 * filtY.fx2) - (fa1 * filtY.fy1) - (fa2 * filtY.fy2);
 
   // Update history
-  fx2 = fx1;
-  fx1 = input;
-  fy2 = fy1;
-  fy1 = output;
+  filtY.fx2 = filtY.fx1;
+  filtY.fx1 = input;
+  filtY.fy2 = filtY.fy1;
+  filtY.fy1 = output;
+
+  return output;
+}
+
+float applyFilterX(int16_t input) {
+  // Use the new prefixed names in the calculation
+  float output = (fb0 * input) + (fb1 * filtX.fx1) + (fb2 * filtX.fx2) - (fa1 * filtX.fy1) - (fa2 * filtX.fy2);
+
+  // Update history
+  filtX.fx2 = filtX.fx1;
+  filtX.fx1 = input;
+  filtX.fy2 = filtX.fy1;
+  filtX.fy1 = output;
+
+  return output;
+}
+
+float applyFilterZ(int16_t input) {
+  // Use the new prefixed names in the calculation
+  float output = (fb0 * input) + (fb1 * filtZ.fx1) + (fb2 * filtZ.fx2) - (fa1 * filtZ.fy1) - (fa2 * filtZ.fy2);
+
+  // Update history
+  filtZ.fx2 = filtZ.fx1;
+  filtZ.fx1 = input;
+  filtZ.fy2 = filtZ.fy1;
+  filtZ.fy1 = output;
 
   return output;
 }
@@ -165,9 +238,14 @@ float applyFilter(int16_t input) {
 // Add a global flag at the top of your code
 bool rebootTriggered = false;
 float filteredVibration = 0;
-int16_t sensorOffset = 0; // This stores our "resting" voltage
-int16_t finalValue = 0;
-const int sensorPin = A0;
+int16_t sensorOffsetY = 0; // This stores our "resting" voltage
+int16_t sensorOffsetX = 0; // This stores our "resting" voltage
+int16_t sensorOffsetZ = 0; // This stores our "resting" voltage
+
+int16_t finalValueY = 0;
+int16_t finalValueX = 0;
+int16_t finalValueZ = 0;
+
 int systemState = 0; // 0 = Booting
 char lineBuffer[128]; // Buffer for the string
 unsigned long long nanoSeconds;
@@ -181,6 +259,7 @@ void petTheDog() {
 }
 
 void setup() {
+  setFiltInit();
   readConfig();
 
   Ethernet.init(W5500_CS); 
@@ -224,18 +303,43 @@ void setup() {
   delay(5000);
   server.begin();
 
-  Serial.println("M7: Deep Calibration starting...");
+  Serial.println("M7: Deep Calibration Y starting...");
   long runningSum = 0;
   const int calibrationSamples = 1000; // Increased for better 16-bit accuracy
 
   for (int i = 0; i < calibrationSamples; i++) {
       petTheDog();
-      runningSum += ads.readADC_Differential_0_1();
+      runningSum += ads.readADC_SingleEnded(0);
       delay(2); // Faster sampling for calibration
   }
-  sensorOffset = runningSum / calibrationSamples;
-  Serial.print("M7: Calibration complete. Offset: ");
-  Serial.println(sensorOffset);
+  sensorOffsetY = runningSum / calibrationSamples;
+  Serial.print("M7: Calibration Y complete. Offset: ");
+  Serial.println(sensorOffsetY);
+
+  Serial.println("M7: Deep Calibration X starting...");
+  runningSum = 0;
+
+  for (int i = 0; i < calibrationSamples; i++) {
+      petTheDog();
+      runningSum += ads.readADC_SingleEnded(1);
+      delay(2); // Faster sampling for calibration
+  }
+  sensorOffsetX = runningSum / calibrationSamples;
+  Serial.print("M7: Calibration X complete. Offset: ");
+  Serial.println(sensorOffsetX);
+
+  Serial.println("M7: Deep Calibration Z starting...");
+  runningSum = 0;
+
+  for (int i = 0; i < calibrationSamples; i++) {
+      petTheDog();
+      runningSum += ads.readADC_SingleEnded(2);
+      delay(2); // Faster sampling for calibration
+  }
+  sensorOffsetZ = runningSum / calibrationSamples;
+  Serial.print("M7: Calibration Z complete. Offset: ");
+  Serial.println(sensorOffsetZ);
+
   Udp.begin(localPort);
 }
 static unsigned long lastSample = 0;
@@ -252,25 +356,50 @@ void loop() {
   if (micros() - lastSample >= currentSettings.Samples) {
     lastSample = micros(); // Update lastSample!
   
-    int raw = ads.readADC_Differential_0_1();
-    // Subtract the sensorOffset to force "rest" to 0.00
-    long input = raw - sensorOffset;
+    int rawY = ads.readADC_SingleEnded(0);
+    long inputY = rawY - sensorOffsetY;
+    finalValueY = (int16_t)applyFilterY(inputY);
 
-    finalValue = (int16_t)applyFilter(input);
+    int rawX = ads.readADC_SingleEnded(1);
+    long inputX = rawX - sensorOffsetX;
+    finalValueX = (int16_t)applyFilterX(inputX);
+
+    int rawZ = ads.readADC_SingleEnded(02);
+    long inputZ = rawZ - sensorOffsetZ;
+    finalValueZ = (int16_t)applyFilterZ(inputZ);
+    
 
 
     if (sampleCounter < SAMPLES) {
-      vReal[sampleCounter] = (double)finalValue; // Use the filtered signal for FFT
-      vImag[sampleCounter] = 0;
+      vRealY[sampleCounter] = (double)finalValueY; // Use the filtered signal for FFT
+      vImagY[sampleCounter] = 0;
+
+      vRealX[sampleCounter] = (double)finalValueX; // Use the filtered signal for FFT
+      vImagX[sampleCounter] = 0;
+
+      vRealZ[sampleCounter] = (double)finalValueZ; // Use the filtered signal for FFT
+      vImagZ[sampleCounter] = 0;
+
       sampleCounter++;
     }
   }
   // 2. When buffer is full, calculate frequency
   if (sampleCounter >= SAMPLES) {
-    FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-    FFT.compute(FFT_FORWARD);
-    FFT.complexToMagnitude();
-    peakFrequency = FFT.majorPeak();
+    FFTy.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+    FFTy.compute(FFT_FORWARD);
+    FFTy.complexToMagnitude();
+    peakFrequencyY = FFTy.majorPeak();
+
+    FFTx.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+    FFTx.compute(FFT_FORWARD);
+    FFTx.complexToMagnitude();
+    peakFrequencyX = FFTx.majorPeak();
+
+    FFTz.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+    FFTz.compute(FFT_FORWARD);
+    FFTz.complexToMagnitude();
+    peakFrequencyZ = FFTz.majorPeak();
+
     sampleCounter = 0; // Reset for next batch
   }
 
@@ -279,33 +408,79 @@ void loop() {
   if (millis() - lastUpload >= currentSettings.Upload) {
     lastUpload = millis();
 
-    if (isnan(peakFrequency)) {
-      peakFrequency = 0.00;
+    if (isnan(peakFrequencyY)) {
+      peakFrequencyY = 0.00;
+    }
+    if (isnan(peakFrequencyX)) {
+      peakFrequencyX = 0.00;
+    }
+    if (isnan(peakFrequencyZ)) {
+      peakFrequencyZ = 0.00;
     }
     elapsed = (uint64_t)millis() - millisAtRead;
     currentEpochMs = epochMilliseconds + elapsed;
 
-    // Replace your sprintf line with this:
-    String payload = "seismic_data,location=shop,sensor=gs20dx ";
-    payload += "amplitude=" + String(finalValue) + "i,"; // 'i' denotes integer for Influx
-    payload += "frequency=" + String(peakFrequency, 2);
+    String payload = "seismic_data,location=shop,sensor=Y ";
+    payload += "amplitude=" + String(finalValueY) + "i,"; // 'i' denotes integer for Influx
+    payload += "frequency=" + String(peakFrequencyY, 2);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
+    int errY = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
-    // Use the String payload in the post
-    int err = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
-
-    if (err == 0) {
-      int status = Hclient.responseStatusCode();
+    if (errY == 0) {
+      int statusY = Hclient.responseStatusCode();
       // Only read the body if there is actually an error to report
-      if (status != 204) {
-        String response = Hclient.responseBody();
-        Serial.println("Error: " + response);
+      if (statusY != 204) {
+        String responseY = Hclient.responseBody();
+        Serial.println("Error: " + responseY);
       }
     }
     //sendFiberState(systemState);
     // THE FIX: Close the connection so the next loop starts fresh
     Hclient.flush();
     Hclient.stop();
+
+    petTheDog();
+
+    payload = "seismic_data,location=shop,sensor=X ";
+    payload += "amplitude=" + String(finalValueX) + "i,"; // 'i' denotes integer for Influx
+    payload += "frequency=" + String(peakFrequencyX, 2);
+    //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
+    int errX = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
+
+    if (errX == 0) {
+      int statusX = Hclient.responseStatusCode();
+      // Only read the body if there is actually an error to report
+      if (statusX != 204) {
+        String responseX = Hclient.responseBody();
+        Serial.println("Error: " + responseX);
+      }
+    }
+    //sendFiberState(systemState);
+    // THE FIX: Close the connection so the next loop starts fresh
+    Hclient.flush();
+    Hclient.stop();
+
+    petTheDog();
+
+    payload = "seismic_data,location=shop,sensor=Z ";
+    payload += "amplitude=" + String(finalValueZ) + "i,"; // 'i' denotes integer for Influx
+    payload += "frequency=" + String(peakFrequencyZ, 2);
+    //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
+    int errZ = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
+
+    if (errZ == 0) {
+      int statusZ = Hclient.responseStatusCode();
+      // Only read the body if there is actually an error to report
+      if (statusZ != 204) {
+        String responseZ = Hclient.responseBody();
+        Serial.println("Error: " + responseZ);
+      }
+    }
+    //sendFiberState(systemState);
+    // THE FIX: Close the connection so the next loop starts fresh
+    Hclient.flush();
+    Hclient.stop();
+
     petTheDog();
   }
   if (Udp.parsePacket()) {
