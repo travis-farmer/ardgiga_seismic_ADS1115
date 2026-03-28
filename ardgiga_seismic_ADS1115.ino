@@ -18,9 +18,12 @@ EthernetServer server(23);
 
 struct Config {
   int adsGain;          // 0 = 2/3, 1 = 1, 2 = 2, 4 = 4, 8 = 8, 16 = 16
-  int Samples;        // Number of samples before Influx upload
-  int Upload; // Seconds between NTP syncs
-  float sensorOffset;   // Manual DC offset adjustment
+  int Samples;
+  int Upload;
+  int16_t sensorOffsetY;   // Manual DC offset adjustment
+  int16_t sensorOffsetX;   // Manual DC offset adjustment
+  int16_t sensorOffsetZ;   // Manual DC offset adjustment
+  
 } currentSettings;
 const char* configFile = "config.txt";
 
@@ -29,10 +32,12 @@ void readConfig() {
 
   if (!sdStatus || !SD.exists(configFile)) {
     // FALLBACK: Load these if the card is dead or the file is missing
-    currentSettings.adsGain = 16;      // Your current max gain
-    currentSettings.Samples = 5000;  // 1-second batches
+    currentSettings.adsGain = 1;
+    currentSettings.Samples = 5000;
     currentSettings.Upload = 5000; 
-    currentSettings.sensorOffset = 0.0;
+    currentSettings.sensorOffsetY = 0;
+    currentSettings.sensorOffsetX = 0;
+    currentSettings.sensorOffsetZ = 0;
     
     Serial.println("WARNING: Vault running in SAFE MODE (Defaults loaded)");
     return;
@@ -45,7 +50,10 @@ void readConfig() {
     if (line.startsWith("GAIN=")) currentSettings.adsGain = line.substring(5).toInt();
     if (line.startsWith("SAMPLES=")) currentSettings.Samples = line.substring(8).toInt();
     if (line.startsWith("UPLOAD=")) currentSettings.Upload = line.substring(12).toInt();
-    if (line.startsWith("OFFSET=")) currentSettings.sensorOffset = line.substring(7).toFloat();
+    if (line.startsWith("OFFSETY=")) currentSettings.sensorOffsetY = line.substring(8).toInt();
+    if (line.startsWith("OFFSETX=")) currentSettings.sensorOffsetX = line.substring(8).toInt();
+    if (line.startsWith("OFFSETZ=")) currentSettings.sensorOffsetZ = line.substring(8).toInt();
+    
   }
   f.close();
 }
@@ -70,8 +78,16 @@ void handleTelnet() {
       currentSettings.Upload = cmd.substring(16).toInt();
       changed = true;
     }
-    else if (cmd.startsWith("SET_OFFSET=")) {
-      currentSettings.sensorOffset = cmd.substring(11).toFloat();
+    else if (cmd.startsWith("SET_OFFSETY=")) {
+      currentSettings.sensorOffsetY = cmd.substring(12).toInt();
+      changed = true;
+    }
+    else if (cmd.startsWith("SET_OFFSETX=")) {
+      currentSettings.sensorOffsetX = cmd.substring(12).toInt();
+      changed = true;
+    }
+    else if (cmd.startsWith("SET_OFFSETZ=")) {
+      currentSettings.sensorOffsetZ = cmd.substring(12).toInt();
       changed = true;
     }
 
@@ -92,7 +108,10 @@ void handleTelnet() {
       client.println("Gain: " + String(currentSettings.adsGain));
       client.println("Samples: " + String(currentSettings.Samples));
       client.println("Upload: " + String(currentSettings.Upload));
-      client.println("Offset: " + String(currentSettings.sensorOffset));
+      client.println("OffsetY: " + String(currentSettings.sensorOffsetY));
+      client.println("OffsetX: " + String(currentSettings.sensorOffsetX));
+      client.println("OffsetZ: " + String(currentSettings.sensorOffsetZ));
+      
     }
   }
 }
@@ -108,7 +127,10 @@ void writeConfig() {
     f.println("GAIN=" + String(currentSettings.adsGain));
     f.println("SAMPLES=" + String(currentSettings.Samples));
     f.println("UPLOAD=" + String(currentSettings.Upload));
-    f.println("OFFSET=" + String(currentSettings.sensorOffset, 4)); // 4 decimal places
+    f.println("OFFSETY=" + String(currentSettings.sensorOffsetY)); // 4 decimal places
+    f.println("OFFSETX=" + String(currentSettings.sensorOffsetX)); // 4 decimal places
+    f.println("OFFSETZ=" + String(currentSettings.sensorOffsetZ)); // 4 decimal places
+    
     f.close();
   }
 }
@@ -238,9 +260,7 @@ float applyFilterZ(int16_t input) {
 // Add a global flag at the top of your code
 bool rebootTriggered = false;
 float filteredVibration = 0;
-int16_t sensorOffsetY = 0; // This stores our "resting" voltage
-int16_t sensorOffsetX = 0; // This stores our "resting" voltage
-int16_t sensorOffsetZ = 0; // This stores our "resting" voltage
+
 
 int16_t finalValueY = 0;
 int16_t finalValueX = 0;
@@ -277,8 +297,27 @@ void setup() {
     Serial.println("Failed to initialize ADS1115!");
     while (1);
   }
+  select(currentSettings.adsGain) {
+    case 0:
+      ads.setGain(GAIN_TWOTHIRDS)
+      break;
+    case 1:
+      ads.setGain(GAIN_ONE);
+      break;
+    case 2:
+      ads.setGain(GAIN_TWO);
+      break;
+    case 4:
+      ads.setGain(GAIN_FOUR);
+      break;
+    case 8:
+      ads.setGain(GAIN_EIGHT);
+      break;
+    case 16:
+      ads.setGain(GAIN_SIXTEEN);
+      break;
+  }
   
-  ads.setGain(GAIN_SIXTEEN);
   petTheDog();
 
   Serial.begin(115200); // Debug
@@ -312,9 +351,9 @@ void setup() {
       runningSum += ads.readADC_SingleEnded(0);
       delay(2); // Faster sampling for calibration
   }
-  sensorOffsetY = runningSum / calibrationSamples;
+  currentSettings.sensorOffsetY = runningSum / calibrationSamples;
   Serial.print("M7: Calibration Y complete. Offset: ");
-  Serial.println(sensorOffsetY);
+  Serial.println(currentSettings.sensorOffsetY);
 
   Serial.println("M7: Deep Calibration X starting...");
   runningSum = 0;
@@ -324,9 +363,9 @@ void setup() {
       runningSum += ads.readADC_SingleEnded(1);
       delay(2); // Faster sampling for calibration
   }
-  sensorOffsetX = runningSum / calibrationSamples;
+  currentSettings.sensorOffsetX = runningSum / calibrationSamples;
   Serial.print("M7: Calibration X complete. Offset: ");
-  Serial.println(sensorOffsetX);
+  Serial.println(currentSettings.sensorOffsetX);
 
   Serial.println("M7: Deep Calibration Z starting...");
   runningSum = 0;
@@ -336,9 +375,9 @@ void setup() {
       runningSum += ads.readADC_SingleEnded(2);
       delay(2); // Faster sampling for calibration
   }
-  sensorOffsetZ = runningSum / calibrationSamples;
+  currentSettings.sensorOffsetZ = runningSum / calibrationSamples;
   Serial.print("M7: Calibration Z complete. Offset: ");
-  Serial.println(sensorOffsetZ);
+  Serial.println(currentSettings.sensorOffsetZ);
 
   Udp.begin(localPort);
 }
