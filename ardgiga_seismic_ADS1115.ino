@@ -4,8 +4,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <Ethernet.h>
-#include <EthernetUdp.h>
-
+#include <Adafruit_GPS.h>
 // Update this to whatever pin you wire to 'CS' on the W5500
 const int W5500_CS = 10;
 #include <ArduinoHttpClient.h>
@@ -15,6 +14,7 @@ const int W5500_CS = 10;
 #define SAMPLES 128            // Increased for better resolution
 #define SAMPLE_FREQ 200      
 EthernetServer server(23);
+Adafruit_GPS GPS(&Serial1);
 
 struct Config {
   int adsGain;          // 0 = 2/3, 1 = 1, 2 = 2, 4 = 4, 8 = 8, 16 = 16
@@ -26,6 +26,10 @@ struct Config {
   float VMMSY;           // Volts/mm/s Y
   float VMMSX;           // Volts/mm/s X
   float VMMSZ;           // Volts/mm/s Z
+  float GainRy;           // Gain Resistor exact value.
+  float GainRx;           // Gain Resistor exact value.
+  float GainRz;           // Gain Resistor exact value.
+  
 } currentSettings;
 const char* configFile = "config.txt";
 
@@ -43,6 +47,9 @@ void readConfig() {
     currentSettings.VMMSY = 1.1300;
     currentSettings.VMMSX = 1.1300;
     currentSettings.VMMSZ = 1.1300;
+    currentSettings.GainRy = 10000.00;
+    currentSettings.GainRx = 10000.00;
+    currentSettings.GainRz = 10000.00;
     
     Serial.println("WARNING: Vault running in SAFE MODE (Defaults loaded)");
     return;
@@ -61,6 +68,9 @@ void readConfig() {
     if (line.startsWith("VMMSY=")) currentSettings.VMMSY = line.substring(6).toFloat();
     if (line.startsWith("VMMSX=")) currentSettings.VMMSX = line.substring(6).toFloat();
     if (line.startsWith("VMMSZ=")) currentSettings.VMMSZ = line.substring(6).toFloat();
+    if (line.startsWith("GAINRY=")) currentSettings.GainRy = line.substring(7).toFloat();
+    if (line.startsWith("GAINRX=")) currentSettings.GainRx = line.substring(7).toFloat();
+    if (line.startsWith("GAINRZ=")) currentSettings.GainRz = line.substring(7).toFloat();
     
   }
   f.close();
@@ -99,18 +109,30 @@ void handleTelnet() {
       changed = true;
     }
     else if (cmd.startsWith("SET_VMMSY=")) {
-      currentSettings.VMMSY = cmd.substring(12).toFloat();
+      currentSettings.VMMSY = cmd.substring(10).toFloat();
       changed = true;
     }
     else if (cmd.startsWith("SET_VMMSX=")) {
-      currentSettings.VMMSX = cmd.substring(12).toFloat();
+      currentSettings.VMMSX = cmd.substring(10).toFloat();
       changed = true;
     }
     else if (cmd.startsWith("SET_VMMSZ=")) {
-      currentSettings.VMMSZ = cmd.substring(12).toFloat();
+      currentSettings.VMMSZ = cmd.substring(10).toFloat();
       changed = true;
     }
-
+    else if (cmd.startsWith("SET_GAINR_Y=")) {
+      currentSettings.GainRy = cmd.substring(12).toFloat();
+      changed = true;
+    }
+    else if (cmd.startsWith("SET_GAINR_X=")) {
+      currentSettings.GainRx = cmd.substring(12).toFloat();
+      changed = true;
+    }
+    else if (cmd.startsWith("SET_GAINR_Z=")) {
+      currentSettings.GainRz = cmd.substring(12).toFloat();
+      changed = true;
+    }
+    
     if (changed) {
       writeConfig(); // Save to SD immediately
       client.println("Settings staged to SD. Send 'COMMIT' to apply and reboot.");
@@ -134,6 +156,9 @@ void handleTelnet() {
       client.println("VMMS Y: " + String(currentSettings.VMMSY,4));
       client.println("VMMS X: " + String(currentSettings.VMMSX,4));
       client.println("VMMS Z: " + String(currentSettings.VMMSZ,4));
+      client.println("Gain R Y: " + String(currentSettings.GainRy,4));
+      client.println("Gain R X: " + String(currentSettings.GainRx,4));
+      client.println("Gain R Z: " + String(currentSettings.GainRz,4));
       
     }
   }
@@ -156,12 +181,32 @@ void writeConfig() {
     f.println("VMMSY=" + String(currentSettings.VMMSY,4)); // 4 decimal places
     f.println("VMMSX=" + String(currentSettings.VMMSX,4)); // 4 decimal places
     f.println("VMMSZ=" + String(currentSettings.VMMSZ,4)); // 4 decimal places
+    f.println("GAINRY=" + String(currentSettings.GainRy,4)); // 4 decimal places
+    f.println("GAINRX=" + String(currentSettings.GainRx,4)); // 4 decimal places
+    f.println("GAINRZ=" + String(currentSettings.GainRz,4)); // 4 decimal places
     
     f.close();
   }
 }
 
+uint64_t epochMilliseconds;
 
+void syncRTCtoGPS() {
+  if (GPS.fix) {
+    struct tm t;
+    t.tm_sec = GPS.seconds;
+    t.tm_min = GPS.minute;
+    t.tm_hour = GPS.hour;
+    t.tm_mday = GPS.day;
+    t.tm_mon = GPS.month - 1;    // tm_mon is 0-11
+    t.tm_year = GPS.year + 100;  // tm_year is years since 1900 (GPS is 20xx)
+    
+    // Convert to Unix Epoch
+    time_t epoch = mktime(&t);
+    
+    epochMilliseconds = (uint64_t)epoch * 1000L;
+  }
+}
 
 double vRealY[SAMPLES];
 double vImagY[SAMPLES];
@@ -183,16 +228,7 @@ EthernetClient ethernet;
 float peakFrequencyY = 0;
 float peakFrequencyX = 0;
 float peakFrequencyZ = 0;
-unsigned int localPort = 8888;       // local port to listen for UDP packets
 
-const char timeServer[] = "time.nist.gov"; // time.nist.gov NTP server
-
-const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-
-byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-
-// A UDP instance to let us send and receive packets over UDP
-EthernetUDP Udp;
 char serverAddress[] = "192.168.1.103"; 
 int port = 8086;
 
@@ -304,7 +340,7 @@ void petTheDog() {
   mbed::Watchdog::get_instance().kick();
 }
 
-double getPGV(int Gain, float VMMS, uint16_t ADC) {
+double getPGV(int Gain, float GainR, float VMMS, uint16_t ADC) {
   double adcVolts = 0.0000000000;
   switch(Gain) {
     case 0:
@@ -326,7 +362,9 @@ double getPGV(int Gain, float VMMS, uint16_t ADC) {
       adcVolts = 0.0000078125;
       break;
   }
-  return ((((double)ADC * adcVolts) / (double)VMMS));
+  double ampGain = (1 + (100000 / (double)GainR));
+  double Resolution = (adcVolts/ampGain);
+  return (abs(((double)ADC * Resolution) / (double)VMMS));
 }
 
 void setup() {
@@ -429,8 +467,6 @@ void setup() {
   currentSettings.sensorOffsetZ = runningSum / calibrationSamples;
   Serial.print("M7: Calibration Z complete. Offset: ");
   Serial.println(currentSettings.sensorOffsetZ);
-
-  Udp.begin(localPort);
 }
 static unsigned long lastSample = 0;
 static int sampleCounter = 0;
@@ -438,10 +474,9 @@ static unsigned long lastUpload = 0;
 uint64_t millisAtRead;
 uint64_t currentEpochMs;
 uint64_t elapsed;
-uint64_t epochMilliseconds;
+
 
 void loop() {
-  //sendNTPpacket(timeServer); // send an NTP packet to a time server
   // 1. High-speed Sampling & Filtering (Every 5ms = 200Hz)
   if (micros() - lastSample >= currentSettings.Samples) {
     lastSample = micros(); // Update lastSample!
@@ -498,6 +533,8 @@ void loop() {
   if (millis() - lastUpload >= currentSettings.Upload) {
     lastUpload = millis();
 
+    syncRTCtoGPS();
+
     if (isnan(peakFrequencyY)) {
       peakFrequencyY = 0.00;
     }
@@ -513,7 +550,7 @@ void loop() {
     String payload = "seismic_data,location=shop,sensor=Y ";
     payload += "amplitude=" + String(finalValueY) + "i,"; // 'i' denotes integer for Influx
     payload += "frequency=" + String(peakFrequencyY, 2);
-    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.VMMSY,finalValueY),10);
+    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.GainRy,currentSettings.VMMSY,finalValueY),10);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
     int errY = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
@@ -535,7 +572,7 @@ void loop() {
     payload = "seismic_data,location=shop,sensor=X ";
     payload += "amplitude=" + String(finalValueX) + "i,"; // 'i' denotes integer for Influx
     payload += "frequency=" + String(peakFrequencyX, 2);
-    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.VMMSX,finalValueX),10);
+    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.GainRx,currentSettings.VMMSX,finalValueX),10);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
     int errX = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
@@ -557,7 +594,7 @@ void loop() {
     payload = "seismic_data,location=shop,sensor=Z ";
     payload += "amplitude=" + String(finalValueZ) + "i,"; // 'i' denotes integer for Influx
     payload += "frequency=" + String(peakFrequencyZ, 2);
-    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.VMMSZ,finalValueZ),10);
+    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.GainRz,currentSettings.VMMSZ,finalValueZ),10);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
     int errZ = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
@@ -576,25 +613,7 @@ void loop() {
 
     petTheDog();
   }
-  if (Udp.parsePacket()) {
-    // We've received a packet, read the data from it
-    Udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-    millisAtRead = (uint64_t)millis();
-    // the timestamp starts at byte 40 of the received packet and is four bytes,
-    // or two words, long. First, extract the two words:
-
-    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
-    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
-    // combine the four bytes (two words) into a long integer
-    // this is NTP time (seconds since Jan 1 1900):
-    unsigned long secsSince1900 = highWord << 16 | lowWord;
-    // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
-    const unsigned long seventyYears = 2208988800UL;
-    // subtract seventy years:
-    unsigned long epoch = secsSince1900 - seventyYears;
-    epochMilliseconds = (uint64_t)epoch * 1000L;
-    
-  }
+  
   handleTelnet();
   petTheDog();
 }
