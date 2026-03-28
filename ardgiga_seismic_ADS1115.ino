@@ -454,7 +454,7 @@ void loop() {
     long inputX = rawX - currentSettings.sensorOffsetX;
     finalValueX = (int16_t)applyFilterX(inputX);
 
-    int rawZ = ads.readADC_SingleEnded(02);
+    int rawZ = ads.readADC_SingleEnded(2);
     long inputZ = rawZ - currentSettings.sensorOffsetZ;
     finalValueZ = (int16_t)applyFilterZ(inputZ);
     
