@@ -23,7 +23,9 @@ struct Config {
   int16_t sensorOffsetY;   // Manual DC offset adjustment
   int16_t sensorOffsetX;   // Manual DC offset adjustment
   int16_t sensorOffsetZ;   // Manual DC offset adjustment
-  
+  float VMMSY;           // Volts/mm/s Y
+  float VMMSX;           // Volts/mm/s X
+  float VMMSZ;           // Volts/mm/s Z
 } currentSettings;
 const char* configFile = "config.txt";
 
@@ -38,6 +40,9 @@ void readConfig() {
     currentSettings.sensorOffsetY = 0;
     currentSettings.sensorOffsetX = 0;
     currentSettings.sensorOffsetZ = 0;
+    currentSettings.VMMSY = 1.1300;
+    currentSettings.VMMSX = 1.1300;
+    currentSettings.VMMSZ = 1.1300;
     
     Serial.println("WARNING: Vault running in SAFE MODE (Defaults loaded)");
     return;
@@ -53,6 +58,9 @@ void readConfig() {
     if (line.startsWith("OFFSETY=")) currentSettings.sensorOffsetY = line.substring(8).toInt();
     if (line.startsWith("OFFSETX=")) currentSettings.sensorOffsetX = line.substring(8).toInt();
     if (line.startsWith("OFFSETZ=")) currentSettings.sensorOffsetZ = line.substring(8).toInt();
+    if (line.startsWith("VMMSY=")) currentSettings.VMMSY = line.substring(6).toFloat();
+    if (line.startsWith("VMMSX=")) currentSettings.VMMSX = line.substring(6).toFloat();
+    if (line.startsWith("VMMSZ=")) currentSettings.VMMSZ = line.substring(6).toFloat();
     
   }
   f.close();
@@ -90,6 +98,18 @@ void handleTelnet() {
       currentSettings.sensorOffsetZ = cmd.substring(12).toInt();
       changed = true;
     }
+    else if (cmd.startsWith("SET_VMMSY=")) {
+      currentSettings.VMMSY = cmd.substring(12).toFloat();
+      changed = true;
+    }
+    else if (cmd.startsWith("SET_VMMSX=")) {
+      currentSettings.VMMSX = cmd.substring(12).toFloat();
+      changed = true;
+    }
+    else if (cmd.startsWith("SET_VMMSZ=")) {
+      currentSettings.VMMSZ = cmd.substring(12).toFloat();
+      changed = true;
+    }
 
     if (changed) {
       writeConfig(); // Save to SD immediately
@@ -111,6 +131,9 @@ void handleTelnet() {
       client.println("OffsetY: " + String(currentSettings.sensorOffsetY));
       client.println("OffsetX: " + String(currentSettings.sensorOffsetX));
       client.println("OffsetZ: " + String(currentSettings.sensorOffsetZ));
+      client.println("VMMS Y: " + String(currentSettings.VMMSY,4));
+      client.println("VMMS X: " + String(currentSettings.VMMSX,4));
+      client.println("VMMS Z: " + String(currentSettings.VMMSZ,4));
       
     }
   }
@@ -127,9 +150,12 @@ void writeConfig() {
     f.println("GAIN=" + String(currentSettings.adsGain));
     f.println("SAMPLES=" + String(currentSettings.Samples));
     f.println("UPLOAD=" + String(currentSettings.Upload));
-    f.println("OFFSETY=" + String(currentSettings.sensorOffsetY)); // 4 decimal places
-    f.println("OFFSETX=" + String(currentSettings.sensorOffsetX)); // 4 decimal places
-    f.println("OFFSETZ=" + String(currentSettings.sensorOffsetZ)); // 4 decimal places
+    f.println("OFFSETY=" + String(currentSettings.sensorOffsetY));
+    f.println("OFFSETX=" + String(currentSettings.sensorOffsetX));
+    f.println("OFFSETZ=" + String(currentSettings.sensorOffsetZ));
+    f.println("VMMSY=" + String(currentSettings.VMMSY,4)); // 4 decimal places
+    f.println("VMMSX=" + String(currentSettings.VMMSX,4)); // 4 decimal places
+    f.println("VMMSZ=" + String(currentSettings.VMMSZ,4)); // 4 decimal places
     
     f.close();
   }
@@ -278,6 +304,31 @@ void petTheDog() {
   mbed::Watchdog::get_instance().kick();
 }
 
+float getPGV(int Gain, float VMMS, uint16_t ADC) {
+  float adcVolts = 0.0000000000;
+  switch(Gain) {
+    case 0:
+      adcVolts = 0.0001875;
+      break;
+    case 1:
+      adcVolts = 0.000125;
+      break;
+    case 2:
+      adcVolts = 0.0000625;
+      break;
+    case 4:
+      adcVolts = 0.00003125;
+      break;
+    case 8:
+      adcVolts = 0.000015625;
+      break;
+    case 16:
+      adcVolts = 0.0000078125;
+      break;
+  }
+  return (((ADC * adcVolts) / VMMS));
+}
+
 void setup() {
   setFiltInit();
   readConfig();
@@ -297,9 +348,9 @@ void setup() {
     Serial.println("Failed to initialize ADS1115!");
     while (1);
   }
-  select(currentSettings.adsGain) {
+  switch(currentSettings.adsGain) {
     case 0:
-      ads.setGain(GAIN_TWOTHIRDS)
+      ads.setGain(GAIN_TWOTHIRDS);
       break;
     case 1:
       ads.setGain(GAIN_ONE);
@@ -396,15 +447,15 @@ void loop() {
     lastSample = micros(); // Update lastSample!
   
     int rawY = ads.readADC_SingleEnded(0);
-    long inputY = rawY - sensorOffsetY;
+    long inputY = rawY - currentSettings.sensorOffsetY;
     finalValueY = (int16_t)applyFilterY(inputY);
 
     int rawX = ads.readADC_SingleEnded(1);
-    long inputX = rawX - sensorOffsetX;
+    long inputX = rawX - currentSettings.sensorOffsetX;
     finalValueX = (int16_t)applyFilterX(inputX);
 
     int rawZ = ads.readADC_SingleEnded(02);
-    long inputZ = rawZ - sensorOffsetZ;
+    long inputZ = rawZ - currentSettings.sensorOffsetZ;
     finalValueZ = (int16_t)applyFilterZ(inputZ);
     
 
@@ -462,6 +513,7 @@ void loop() {
     String payload = "seismic_data,location=shop,sensor=Y ";
     payload += "amplitude=" + String(finalValueY) + "i,"; // 'i' denotes integer for Influx
     payload += "frequency=" + String(peakFrequencyY, 2);
+    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.VMMSY,finalValueY),10);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
     int errY = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
@@ -483,6 +535,7 @@ void loop() {
     payload = "seismic_data,location=shop,sensor=X ";
     payload += "amplitude=" + String(finalValueX) + "i,"; // 'i' denotes integer for Influx
     payload += "frequency=" + String(peakFrequencyX, 2);
+    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.VMMSX,finalValueX),10);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
     int errX = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
@@ -504,6 +557,7 @@ void loop() {
     payload = "seismic_data,location=shop,sensor=Z ";
     payload += "amplitude=" + String(finalValueZ) + "i,"; // 'i' denotes integer for Influx
     payload += "frequency=" + String(peakFrequencyZ, 2);
+    payload += ",pgv=" + String(getPGV(currentSettings.adsGain,currentSettings.VMMSZ,finalValueZ),10);
     //if (currentEpochMs > 0) payload += " " + String(currentEpochMs);
     int errZ = Hclient.post("/write?db=seismic&precision=ms", "text/plain", payload);
 
