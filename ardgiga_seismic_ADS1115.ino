@@ -304,8 +304,8 @@ void petTheDog() {
   mbed::Watchdog::get_instance().kick();
 }
 
-float getPGV(int Gain, float VMMS, uint16_t ADC) {
-  float adcVolts = 0.0000000000;
+double getPGV(int Gain, float VMMS, uint16_t ADC) {
+  double adcVolts = 0.0000000000;
   switch(Gain) {
     case 0:
       adcVolts = 0.0001875;
@@ -326,7 +326,7 @@ float getPGV(int Gain, float VMMS, uint16_t ADC) {
       adcVolts = 0.0000078125;
       break;
   }
-  return (((ADC * adcVolts) / VMMS));
+  return ((((double)ADC * adcVolts) / (double)VMMS));
 }
 
 void setup() {
