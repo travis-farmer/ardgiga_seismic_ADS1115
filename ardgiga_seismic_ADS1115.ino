@@ -44,9 +44,9 @@ void readConfig() {
     currentSettings.sensorOffsetY = 0;
     currentSettings.sensorOffsetX = 0;
     currentSettings.sensorOffsetZ = 0;
-    currentSettings.VMMSY = 1.1300;
-    currentSettings.VMMSX = 1.1300;
-    currentSettings.VMMSZ = 1.1300;
+    currentSettings.VMMSY = 0.02655; // 27.6V/m/s * (Rshunt / (Rshunt + Rc '395 Ohm')) = 26.55122655V/M/S / 1000 = 0.02655122655V/mm/S
+    currentSettings.VMMSX = 0.02655;
+    currentSettings.VMMSZ = 0.02655;
     currentSettings.GainRy = 10000.00;
     currentSettings.GainRx = 10000.00;
     currentSettings.GainRz = 10000.00;
@@ -341,30 +341,31 @@ void petTheDog() {
 }
 
 double getPGV(int Gain, float GainR, float VMMS, uint16_t ADC) {
-  double adcVolts = 0.0000000000;
+  double voltsPerBit = 0.0000000000;
   switch(Gain) {
     case 0:
-      adcVolts = 0.0001875;
+      voltsPerBit = 0.0001875;
       break;
     case 1:
-      adcVolts = 0.000125;
+      voltsPerBit = 0.000125;
       break;
     case 2:
-      adcVolts = 0.0000625;
+      voltsPerBit = 0.0000625;
       break;
     case 4:
-      adcVolts = 0.00003125;
+      voltsPerBit = 0.00003125;
       break;
     case 8:
-      adcVolts = 0.000015625;
+      voltsPerBit = 0.000015625;
       break;
     case 16:
-      adcVolts = 0.0000078125;
+      voltsPerBit = 0.0000078125;
       break;
   }
-  double ampGain = (1 + (100000 / (double)GainR));
-  double Resolution = (adcVolts/ampGain);
-  return (abs(((double)ADC * Resolution) / (double)VMMS));
+  double ad623Gain = (1 + (100000 / (double)GainR));
+  double geoConstant = (double)VMMS;
+  double velocity = (abs(ADC) * voltsPerBit) / (ad623Gain * geoConstant);
+  return (velocity);
 }
 
 void setup() {
